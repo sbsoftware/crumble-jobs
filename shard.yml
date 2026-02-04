@@ -1,0 +1,9 @@
+name: crumble-jobs
+version: 0.1.0
+
+authors:
+  - Stefan Bilharz <stefan@sbsoftware.de>
+
+crystal: '>= 1.19.1'
+
+license: MIT
