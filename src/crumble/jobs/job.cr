@@ -6,7 +6,19 @@ require "./value_codec"
 
 module Crumble
   module Jobs
+    record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
+
     abstract class Job
+      macro throttle(*, max_jobs, timespan)
+        {% if max_jobs.is_a?(NumberLiteral) && max_jobs <= 0 %}
+          {{ raise "throttle max_jobs must be greater than 0" }}
+        {% end %}
+
+        def self.throttle_config : Crumble::Jobs::ThrottleConfig?
+          Crumble::Jobs::ThrottleConfig.new(max_jobs: {{max_jobs}}.to_i32, timespan: {{timespan}})
+        end
+      end
+
       macro params(*fields)
         {% allowed = ["String", "Int32", "Int64", "Float32", "Float64", "Time"] %}
         {% for field in fields %}
@@ -80,6 +92,10 @@ module Crumble
 
       def self.job_name : String
         name.to_s
+      end
+
+      def self.throttle_config : Crumble::Jobs::ThrottleConfig?
+        nil
       end
 
       abstract def perform : Nil
