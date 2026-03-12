@@ -1,17 +1,16 @@
 require "../queue_backend"
+require "../throttle_state"
 
 module Crumble
   module Jobs
     class InMemoryJobClassState
       getter execution_lock : Channel(Nil)
-      property window_started_at : Time::Instant?
-      property jobs_started_in_window : Int32
+      getter throttle : ThrottleWindowState
 
       def initialize
         @execution_lock = Channel(Nil).new(1)
         @execution_lock.send(nil)
-        @window_started_at = nil
-        @jobs_started_in_window = 0
+        @throttle = ThrottleWindowState.new
       end
     end
 
@@ -89,25 +88,31 @@ module Crumble
         config = Crumble::Jobs.throttle_config_for(job_class)
         return unless config
 
+        timespan_milliseconds = config.timespan.total_milliseconds.to_i64
         loop do
-          now = Time.instant
-          window_started_at = job_class_state.window_started_at
+          now = unix_milliseconds
+          window_started_at = job_class_state.throttle.window_started_at_unix_ms
 
           # Keep a fixed execution window per class that starts with the first job in a burst.
-          if window_started_at.nil? || now - window_started_at >= config.timespan
-            job_class_state.window_started_at = now
-            job_class_state.jobs_started_in_window = 0
+          if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
+            job_class_state.throttle.window_started_at_unix_ms = now
+            job_class_state.throttle.jobs_started_in_window = 0
             window_started_at = now
           end
 
-          if job_class_state.jobs_started_in_window < config.max_jobs
-            job_class_state.jobs_started_in_window += 1
+          if job_class_state.throttle.jobs_started_in_window < config.max_jobs
+            job_class_state.throttle.jobs_started_in_window += 1
             return
           end
 
-          wait_for = config.timespan - (now - window_started_at)
-          sleep(wait_for) if wait_for > Time::Span.zero
+          wait_for = timespan_milliseconds - (now - window_started_at)
+          sleep(wait_for.milliseconds) if wait_for > 0
         end
+      end
+
+      private def unix_milliseconds : Int64
+        now = Time.utc
+        now.to_unix * 1000 + now.nanosecond // 1_000_000
       end
     end
   end

@@ -1,22 +1,11 @@
 require "../queue_backend"
+require "../throttle_state"
+require "digest/sha1"
 
 module Crumble
   module Jobs
-    class FileJobClassState
-      getter execution_lock : Channel(Nil)
-      property window_started_at : Time::Instant?
-      property jobs_started_in_window : Int32
-
-      def initialize
-        @execution_lock = Channel(Nil).new(1)
-        @execution_lock.send(nil)
-        @window_started_at = nil
-        @jobs_started_in_window = 0
-      end
-    end
-
     class FileReservation < Reservation
-      def initialize(payload : JobPayload, @path : String, @failed_dir : String, @execution_lock : Channel(Nil))
+      def initialize(payload : JobPayload, @path : String, @failed_dir : String, @execution_lock : File)
         super(payload)
         @released = false
       end
@@ -47,7 +36,15 @@ module Crumble
       private def release_execution_lock : Nil
         return if @released
         @released = true
-        @execution_lock.send(nil)
+        begin
+          @execution_lock.flock_unlock
+        rescue
+        end
+
+        begin
+          @execution_lock.close
+        rescue
+        end
       end
     end
 
@@ -59,8 +56,7 @@ module Crumble
         @processing_dir = File.join(@root, "processing")
         @failed_dir = File.join(@root, "failed")
         @tmp_dir = File.join(@root, "tmp")
-        @job_class_states = {} of String => FileJobClassState
-        @job_class_states_lock = Mutex.new
+        @throttle_dir = File.join(@root, "throttle")
         ensure_dirs
       end
 
@@ -116,49 +112,65 @@ module Crumble
       end
 
       private def reservation_for(payload : JobPayload, processing_path : String) : FileReservation
-        job_class_state = job_class_state_for(payload.job_class)
-        job_class_state.execution_lock.receive
+        execution_lock = File.open(lock_path_for(payload.job_class), "a+")
+        wait_for_execution_lock(execution_lock)
         begin
-          throttle_job_execution(payload.job_class, job_class_state)
-          FileReservation.new(payload, processing_path, @failed_dir, job_class_state.execution_lock)
+          throttle_job_execution(payload.job_class)
+          FileReservation.new(payload, processing_path, @failed_dir, execution_lock)
         rescue error
-          job_class_state.execution_lock.send(nil)
+          begin
+            execution_lock.flock_unlock
+          rescue
+          end
+
+          begin
+            execution_lock.close
+          rescue
+          end
+
           raise error
         end
       end
 
-      private def job_class_state_for(job_class : String) : FileJobClassState
-        @job_class_states_lock.synchronize do
-          @job_class_states[job_class]? || begin
-            state = FileJobClassState.new
-            @job_class_states[job_class] = state
-            state
+      private def wait_for_execution_lock(execution_lock : File) : Nil
+        # Non-blocking flock attempts keep the scheduler responsive while another
+        # worker process/fiber still owns the class execution lock.
+        loop do
+          begin
+            execution_lock.flock_exclusive(false)
+            return
+          rescue error : IO::Error
+            raise error unless error.message.try(&.includes?("already locked"))
+            sleep 1.millisecond
           end
         end
       end
 
-      private def throttle_job_execution(job_class : String, job_class_state : FileJobClassState) : Nil
+      private def throttle_job_execution(job_class : String) : Nil
         config = Crumble::Jobs.throttle_config_for(job_class)
         return unless config
 
+        timespan_milliseconds = config.timespan.total_milliseconds.to_i64
         loop do
-          now = Time.instant
-          window_started_at = job_class_state.window_started_at
+          state = read_throttle_state(job_class)
+          now = unix_milliseconds
+          window_started_at = state.window_started_at_unix_ms
 
           # Keep a fixed execution window per class that starts with the first job in a burst.
-          if window_started_at.nil? || now - window_started_at >= config.timespan
-            job_class_state.window_started_at = now
-            job_class_state.jobs_started_in_window = 0
+          if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
+            state.window_started_at_unix_ms = now
+            state.jobs_started_in_window = 0
             window_started_at = now
           end
 
-          if job_class_state.jobs_started_in_window < config.max_jobs
-            job_class_state.jobs_started_in_window += 1
+          if state.jobs_started_in_window < config.max_jobs
+            state.jobs_started_in_window += 1
+            write_throttle_state(job_class, state)
             return
           end
 
-          wait_for = config.timespan - (now - window_started_at)
-          sleep(wait_for) if wait_for > Time::Span.zero
+          wait_for = timespan_milliseconds - (now - window_started_at)
+          sleep(wait_for.milliseconds) if wait_for > 0
         end
       end
 
@@ -180,12 +192,46 @@ module Crumble
         Dir.mkdir_p(@processing_dir)
         Dir.mkdir_p(@failed_dir)
         Dir.mkdir_p(@tmp_dir)
+        Dir.mkdir_p(@throttle_dir)
       end
 
       private def timestamp_prefix : String
         now = Time.utc
         millis = now.to_unix * 1000 + now.nanosecond / 1_000_000
         millis.to_s
+      end
+
+      private def lock_path_for(job_class : String) : String
+        File.join(@throttle_dir, "#{job_class_key(job_class)}.lock")
+      end
+
+      private def state_path_for(job_class : String) : String
+        File.join(@throttle_dir, "#{job_class_key(job_class)}.json")
+      end
+
+      private def read_throttle_state(job_class : String) : ThrottleWindowState
+        path = state_path_for(job_class)
+        return ThrottleWindowState.new unless File.exists?(path)
+
+        ThrottleWindowState.from_json(File.read(path))
+      rescue
+        ThrottleWindowState.new
+      end
+
+      private def write_throttle_state(job_class : String, state : ThrottleWindowState) : Nil
+        path = state_path_for(job_class)
+        tmp_path = "#{path}.tmp"
+        File.write(tmp_path, state.to_json)
+        File.rename(tmp_path, path)
+      end
+
+      private def job_class_key(job_class : String) : String
+        Digest::SHA1.hexdigest(job_class)
+      end
+
+      private def unix_milliseconds : Int64
+        now = Time.utc
+        now.to_unix * 1000 + now.nanosecond // 1_000_000
       end
     end
   end
