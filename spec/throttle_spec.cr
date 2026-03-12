@@ -64,6 +64,31 @@ describe "job throttling" do
     (starts[1][1] - starts[0][1]).should be < 70.milliseconds
   end
 
+  it "shares throttle state across workers that reserve from the same queue" do
+    queue = Crumble::Jobs::InMemoryQueue.new
+    Crumble::Jobs.configure_queue queue
+    ThrottledInMemoryJob.clear
+
+    3.times { |index| ThrottledInMemoryJob.enqueue(sequence: index + 1) }
+
+    worker_one = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
+    worker_two = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
+    worker_one.run_once(50.milliseconds).should be_true
+    worker_two.run_once(50.milliseconds).should be_true
+    worker_one.run_once(500.milliseconds).should be_true
+
+    deadline = Time.instant + 2.seconds
+    until ThrottledInMemoryJob.starts.size == 3 || Time.instant >= deadline
+      sleep 2.milliseconds
+    end
+
+    starts = ThrottledInMemoryJob.starts
+    starts.size.should eq(3)
+    starts.map(&.[0]).should eq([1, 2, 3])
+    (starts[2][1] - starts[0][1]).should be >= 70.milliseconds
+    (starts[1][1] - starts[0][1]).should be < 70.milliseconds
+  end
+
   it "throttles file-queued jobs at execution time and keeps order within the class" do
     queue_root = File.join(Dir.tempdir, "crumble-jobs-throttle-#{UUID.random}")
 
