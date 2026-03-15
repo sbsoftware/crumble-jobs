@@ -23,25 +23,29 @@ module Crumble
         {% if attempts.is_a?(NumberLiteral) && attempts <= 0 %}
           {{ raise "retry_on attempts must be greater than 0" }}
         {% end %}
-        {% module_name = "RetryOn_#{error_class.id}".gsub(/::/, "__").id %}
+        {% has_retry_counter_key_for = @type.methods.any? { |method| method.name == "retry_counter_key_for" } %}
+        {% has_next_retry_in = @type.methods.any? { |method| method.name == "next_retry_in" } %}
 
-        module {{module_name}}
-          def retry_counter_key_for(error : Exception) : String?
-            return {{error_class.stringify}} if error.is_a?({{error_class}})
+        def retry_counter_key_for(error : Exception) : String?
+          return {{error_class.stringify}} if error.is_a?({{error_class}})
+          {% if has_retry_counter_key_for %}
+            previous_def
+          {% else %}
             super
-          end
-
-          def next_retry_in(error : Exception, tries : Int32) : Time::Span?
-            if error.is_a?({{error_class}})
-              return nil if tries > {{attempts}}.to_i32
-              return {{wait}}.call(tries)
-            end
-
-            super
-          end
+          {% end %}
         end
 
-        include {{module_name}}
+        def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+          if error.is_a?({{error_class}})
+            return nil if tries > {{attempts}}.to_i32
+            return {{wait}}.call(tries)
+          end
+          {% if has_next_retry_in %}
+            previous_def
+          {% else %}
+            super
+          {% end %}
+        end
       end
 
       macro params(*fields)
