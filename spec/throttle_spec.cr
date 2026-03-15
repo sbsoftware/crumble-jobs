@@ -6,26 +6,18 @@ class ThrottledJob < Crumble::Jobs::Job
   throttle max_jobs: 2, timespan: 80.milliseconds
   params sequence : Int32
 
-  @@starts = Channel(Tuple(Int32, Time::Instant)).new(100)
+  @@starts = [] of Tuple(Int32, Time::Instant)
 
   def perform : Nil
-    @@starts.send({@sequence, Time.instant})
+    @@starts << {@sequence, Time.instant}
   end
 
-  def self.poll_start : Tuple(Int32, Time::Instant)?
-    select
-    when start = @@starts.receive
-      start
-    when timeout(0.milliseconds)
-      nil
-    end
+  def self.starts : Array(Tuple(Int32, Time::Instant))
+    @@starts
   end
 
   def self.clear : Nil
-    loop do
-      start = poll_start
-      break unless start
-    end
+    @@starts.clear
   end
 end
 
@@ -36,17 +28,14 @@ describe "job throttling" do
 
     3.times { |index| ThrottledJob.enqueue(sequence: index + 1) }
 
-    starts = [] of Tuple(Int32, Time::Instant)
     worker = Crumble::Jobs::Worker.new(max_concurrency: 3, poll_interval: 1.millisecond)
     deadline = Time.instant + 2.seconds
-    until starts.size == 3 || Time.instant >= deadline
+    until ThrottledJob.starts.size == 3 || Time.instant >= deadline
       worker.run_once(10.milliseconds)
-      while start = ThrottledJob.poll_start
-        starts << start
-      end
       sleep 2.milliseconds
     end
 
+    starts = ThrottledJob.starts
     starts.size.should eq(3)
     starts.map(&.[0]).should eq([1, 2, 3])
     (starts[2][1] - starts[0][1]).should be >= 70.milliseconds
@@ -60,19 +49,16 @@ describe "job throttling" do
 
     3.times { |index| ThrottledJob.enqueue(sequence: index + 1) }
 
-    starts = [] of Tuple(Int32, Time::Instant)
     worker_one = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
     worker_two = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
     deadline = Time.instant + 2.seconds
-    until starts.size == 3 || Time.instant >= deadline
+    until ThrottledJob.starts.size == 3 || Time.instant >= deadline
       worker_one.run_once(10.milliseconds)
       worker_two.run_once(10.milliseconds)
-      while start = ThrottledJob.poll_start
-        starts << start
-      end
       sleep 2.milliseconds
     end
 
+    starts = ThrottledJob.starts
     starts.size.should eq(3)
     starts.map(&.[0]).should eq([1, 2, 3])
     (starts[2][1] - starts[0][1]).should be >= 70.milliseconds
@@ -88,17 +74,14 @@ describe "job throttling" do
 
       3.times { |index| ThrottledJob.enqueue(sequence: index + 1) }
 
-      starts = [] of Tuple(Int32, Time::Instant)
       worker = Crumble::Jobs::Worker.new(max_concurrency: 3, poll_interval: 1.millisecond)
       deadline = Time.instant + 2.seconds
-      until starts.size == 3 || Time.instant >= deadline
+      until ThrottledJob.starts.size == 3 || Time.instant >= deadline
         worker.run_once(10.milliseconds)
-        while start = ThrottledJob.poll_start
-          starts << start
-        end
         sleep 2.milliseconds
       end
 
+      starts = ThrottledJob.starts
       starts.size.should eq(3)
       starts.map(&.[0]).should eq([1, 2, 3])
       (starts[2][1] - starts[0][1]).should be >= 70.milliseconds
@@ -119,19 +102,16 @@ describe "job throttling" do
 
       3.times { |index| ThrottledJob.enqueue(sequence: index + 1) }
 
-      starts = [] of Tuple(Int32, Time::Instant)
       worker_one = Crumble::Jobs::Worker.new(queue: queue_one, max_concurrency: 1, poll_interval: 1.millisecond)
       worker_two = Crumble::Jobs::Worker.new(queue: queue_two, max_concurrency: 1, poll_interval: 1.millisecond)
       deadline = Time.instant + 2.seconds
-      until starts.size == 3 || Time.instant >= deadline
+      until ThrottledJob.starts.size == 3 || Time.instant >= deadline
         worker_one.run_once(10.milliseconds)
         worker_two.run_once(10.milliseconds)
-        while start = ThrottledJob.poll_start
-          starts << start
-        end
         sleep 2.milliseconds
       end
 
+      starts = ThrottledJob.starts
       starts.size.should eq(3)
       starts.map(&.[0]).should eq([1, 2, 3])
       (starts[2][1] - starts[0][1]).should be >= 70.milliseconds
