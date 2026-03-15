@@ -7,8 +7,6 @@ require "./value_codec"
 module Crumble
   module Jobs
     record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
-    record RetrySchedule, payload : JobPayload, wait : Time::Span
-    record RetryOutcome, matched : Bool, schedule : RetrySchedule?
 
     abstract class Job
       macro throttle(*, max_jobs, timespan)
@@ -28,21 +26,22 @@ module Crumble
         {% module_name = "RetryOn_#{error_class.id}".gsub(/::/, "__").id %}
 
         module {{module_name}}
-          def retry_outcome_for(payload : Crumble::Jobs::JobPayload, error : Exception) : Crumble::Jobs::RetryOutcome
-            if error.is_a?({{error_class}})
-              retry_count = payload.retry_count_for({{error_class.stringify}}) + 1
-              return Crumble::Jobs::RetryOutcome.new(matched: true, schedule: nil) if retry_count > {{attempts}}.to_i32
+          def retry_counter_key_for(error : Exception) : String?
+            return {{error_class.stringify}} if error.is_a?({{error_class}})
+            super
+          end
 
-              wait_for = {{wait}}.call(retry_count)
-              retry_payload = payload.with_retry_count({{error_class.stringify}}, retry_count)
-              return Crumble::Jobs::RetryOutcome.new(matched: true, schedule: Crumble::Jobs::RetrySchedule.new(payload: retry_payload, wait: wait_for))
+          def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+            if error.is_a?({{error_class}})
+              return nil if tries > {{attempts}}.to_i32
+              return {{wait}}.call(tries)
             end
 
             super
           end
         end
 
-        extend {{module_name}}
+        include {{module_name}}
       end
 
       macro params(*fields)
@@ -124,12 +123,16 @@ module Crumble
         nil
       end
 
-      def self.retry_outcome_for(payload : Crumble::Jobs::JobPayload, error : Exception) : Crumble::Jobs::RetryOutcome
-        Crumble::Jobs::RetryOutcome.new(matched: false, schedule: nil)
-      end
-
       abstract def perform : Nil
       abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
+
+      def retry_counter_key_for(error : Exception) : String?
+        nil
+      end
+
+      def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+        nil
+      end
 
       def enqueue : String
         now = Time.utc

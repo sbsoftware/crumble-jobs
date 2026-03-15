@@ -30,12 +30,6 @@ module Crumble
       def retry_count_for(error_class : String) : Int32
         @retry_counts[error_class]? || 0
       end
-
-      def with_retry_count(error_class : String, retry_count : Int32) : JobPayload
-        updated_retry_counts = @retry_counts.dup
-        updated_retry_counts[error_class] = retry_count
-        JobPayload.new(id: @id, job_class: @job_class, args: @args, enqueued_at: @enqueued_at, retry_counts: updated_retry_counts)
-      end
     end
   end
 end

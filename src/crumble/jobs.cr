@@ -59,20 +59,5 @@ module Crumble
         end
       {% end %}
     end
-
-    def self.retry_outcome_for(payload : JobPayload, error : Exception) : RetryOutcome
-      {% begin %}
-        case payload.job_class
-        {% for job_class in Crumble::Jobs::Job.all_subclasses %}
-          {% unless job_class.abstract? %}
-          when {{job_class}}.job_name
-            {{job_class}}.retry_outcome_for(payload, error)
-          {% end %}
-        {% end %}
-        else
-          RetryOutcome.new(matched: false, schedule: nil)
-        end
-      {% end %}
-    end
   end
 end
