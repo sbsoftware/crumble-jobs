@@ -9,6 +9,16 @@ module Crumble
     record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
 
     abstract class Job
+      macro inherited
+        def retry_counter_key_for(error : Exception) : String?
+          nil
+        end
+
+        def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+          nil
+        end
+      end
+
       macro throttle(*, max_jobs, timespan)
         {% if max_jobs.is_a?(NumberLiteral) && max_jobs <= 0 %}
           {{ raise "throttle max_jobs must be greater than 0" }}
@@ -23,16 +33,10 @@ module Crumble
         {% if attempts.is_a?(NumberLiteral) && attempts <= 0 %}
           {{ raise "retry_on attempts must be greater than 0" }}
         {% end %}
-        {% has_retry_counter_key_for = @type.methods.any? { |method| method.name == "retry_counter_key_for" } %}
-        {% has_next_retry_in = @type.methods.any? { |method| method.name == "next_retry_in" } %}
 
         def retry_counter_key_for(error : Exception) : String?
           return {{error_class.stringify}} if error.is_a?({{error_class}})
-          {% if has_retry_counter_key_for %}
-            previous_def
-          {% else %}
-            super
-          {% end %}
+          previous_def
         end
 
         def next_retry_in(error : Exception, tries : Int32) : Time::Span?
@@ -40,11 +44,7 @@ module Crumble
             return nil if tries > {{attempts}}.to_i32
             return {{wait}}.call(tries)
           end
-          {% if has_next_retry_in %}
-            previous_def
-          {% else %}
-            super
-          {% end %}
+          previous_def
         end
       end
 
