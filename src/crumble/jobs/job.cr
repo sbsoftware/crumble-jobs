@@ -7,6 +7,8 @@ require "./value_codec"
 module Crumble
   module Jobs
     record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
+    record RetrySchedule, payload : JobPayload, wait : Time::Span
+    record RetryOutcome, matched : Bool, schedule : RetrySchedule?
 
     abstract class Job
       macro throttle(*, max_jobs, timespan)
@@ -17,6 +19,30 @@ module Crumble
         def self.throttle_config : Crumble::Jobs::ThrottleConfig?
           Crumble::Jobs::ThrottleConfig.new(max_jobs: {{max_jobs}}.to_i32, timespan: {{timespan}})
         end
+      end
+
+      macro retry_on(error_class, *, attempts, wait)
+        {% if attempts.is_a?(NumberLiteral) && attempts <= 0 %}
+          {{ raise "retry_on attempts must be greater than 0" }}
+        {% end %}
+        {% module_name = "RetryOn_#{error_class.id}".gsub(/::/, "__").id %}
+
+        module {{module_name}}
+          def retry_outcome_for(payload : Crumble::Jobs::JobPayload, error : Exception) : Crumble::Jobs::RetryOutcome
+            if error.is_a?({{error_class}})
+              retry_count = payload.retry_count_for({{error_class.stringify}}) + 1
+              return Crumble::Jobs::RetryOutcome.new(matched: true, schedule: nil) if retry_count > {{attempts}}.to_i32
+
+              wait_for = {{wait}}.call(retry_count)
+              retry_payload = payload.with_retry_count({{error_class.stringify}}, retry_count)
+              return Crumble::Jobs::RetryOutcome.new(matched: true, schedule: Crumble::Jobs::RetrySchedule.new(payload: retry_payload, wait: wait_for))
+            end
+
+            super
+          end
+        end
+
+        extend {{module_name}}
       end
 
       macro params(*fields)
@@ -96,6 +122,10 @@ module Crumble
 
       def self.throttle_config : Crumble::Jobs::ThrottleConfig?
         nil
+      end
+
+      def self.retry_outcome_for(payload : Crumble::Jobs::JobPayload, error : Exception) : Crumble::Jobs::RetryOutcome
+        Crumble::Jobs::RetryOutcome.new(matched: false, schedule: nil)
       end
 
       abstract def perform : Nil

@@ -52,7 +52,18 @@ module Crumble
         reservation.fail(error)
       rescue error
         if payload
-          @logger.error(exception: error) { "Job failed: #{payload.job_class} (#{payload.id})" }
+          retry_outcome = Crumble::Jobs.retry_outcome_for(payload, error)
+          if retry_schedule = retry_outcome.schedule
+            @queue.enqueue(retry_schedule.payload, run_at: Time.utc + retry_schedule.wait)
+            reservation.ack
+            return
+          end
+
+          if retry_outcome.matched
+            @logger.error(exception: error) { "Job retries exhausted: #{payload.job_class} (#{payload.id})" }
+          else
+            @logger.error(exception: error) { "Job failed: #{payload.job_class} (#{payload.id})" }
+          end
         else
           @logger.error(exception: error) { "Job failed before payload decode" }
         end
