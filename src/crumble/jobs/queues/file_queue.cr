@@ -1,6 +1,5 @@
 require "../queue_backend"
 require "../throttle_state"
-require "digest/sha1"
 
 module Crumble
   module Jobs
@@ -229,7 +228,7 @@ module Crumble
       end
 
       private def job_class_key(job_class : String) : String
-        Digest::SHA1.hexdigest(job_class)
+        job_class.gsub("::", "__")
       end
 
       private def unix_milliseconds : Int64
