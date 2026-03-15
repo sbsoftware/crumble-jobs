@@ -44,6 +44,7 @@ module Crumble
 
       private def run_reservation(reservation : Reservation) : Nil
         payload = reservation.payload
+        job = nil
         job = Crumble::Jobs.deserialize(payload)
         job.perform
         reservation.ack
@@ -51,8 +52,19 @@ module Crumble
         @logger.error { error.message }
         reservation.fail(error)
       rescue error
-        if payload
-          @logger.error(exception: error) { "Job failed: #{payload.job_class} (#{payload.id})" }
+        if payload && job
+          if retry_counter_key = job.retry_counter_key_for(error)
+            tries = payload.retry_count_for(retry_counter_key) + 1
+            if retry_in = job.next_retry_in(error, tries)
+              payload.retry_counts[retry_counter_key] = tries
+              @queue.enqueue(payload, run_at: Time.utc + retry_in)
+              reservation.ack
+              return
+            end
+            @logger.error(exception: error) { "Job retries exhausted: #{payload.job_class} (#{payload.id})" }
+          else
+            @logger.error(exception: error) { "Job failed: #{payload.job_class} (#{payload.id})" }
+          end
         else
           @logger.error(exception: error) { "Job failed before payload decode" }
         end

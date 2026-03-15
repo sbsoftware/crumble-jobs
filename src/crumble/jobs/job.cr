@@ -19,6 +19,30 @@ module Crumble
         end
       end
 
+      macro retry_on(error_class, *, attempts, wait)
+        {% if attempts.is_a?(NumberLiteral) && attempts <= 0 %}
+          {{ raise "retry_on attempts must be greater than 0" }}
+        {% end %}
+        {% module_name = "RetryOn_#{error_class.id}".gsub(/::/, "__").id %}
+
+        module {{module_name}}
+          def retry_counter_key_for(error : Exception) : String?
+            return {{error_class.stringify}} if error.is_a?({{error_class}})
+            super
+          end
+
+          def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+            if error.is_a?({{error_class}})
+              return nil if tries > {{attempts}}.to_i32
+              return {{wait}}.call(tries)
+            end
+            super
+          end
+        end
+
+        include {{module_name}}
+      end
+
       macro params(*fields)
         {% allowed = ["String", "Int32", "Int64", "Float32", "Float64", "Time"] %}
         {% for field in fields %}
@@ -100,6 +124,14 @@ module Crumble
 
       abstract def perform : Nil
       abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
+
+      def retry_counter_key_for(error : Exception) : String?
+        nil
+      end
+
+      def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+        nil
+      end
 
       def enqueue : String
         now = Time.utc
