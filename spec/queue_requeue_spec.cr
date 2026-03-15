@@ -6,7 +6,7 @@ describe "queue-level delayed requeue" do
   it "requeues in-memory payloads for a future time" do
     queue = Crumble::Jobs::InMemoryQueue.new
     payload = Crumble::Jobs::JobPayload.new(id: "delayed-memory", job_class: "DelayedMemoryJob", args: [] of Crumble::Jobs::EncodedValue, enqueued_at: Time.utc.to_unix)
-    queue.requeue_at(payload, Time.utc + 80.milliseconds)
+    queue.enqueue(payload, run_at: Time.utc + 80.milliseconds)
     queue.reserve(20.milliseconds).should be_nil
 
     reservation = queue.reserve(200.milliseconds)
@@ -21,7 +21,7 @@ describe "queue-level delayed requeue" do
     begin
       queue = Crumble::Jobs::FileQueue.new(queue_root, poll_interval: 5.milliseconds)
       payload = Crumble::Jobs::JobPayload.new(id: "delayed-file", job_class: "DelayedFileJob", args: [] of Crumble::Jobs::EncodedValue, enqueued_at: Time.utc.to_unix)
-      queue.requeue_at(payload, Time.utc + 80.milliseconds)
+      queue.enqueue(payload, run_at: Time.utc + 80.milliseconds)
       queue.reserve(20.milliseconds).should be_nil
 
       reservation = queue.reserve(300.milliseconds)

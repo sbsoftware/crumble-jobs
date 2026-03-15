@@ -13,34 +13,20 @@ module Crumble
     end
 
     class InMemoryJobClassState
-      getter execution_lock : Channel(Nil)
       getter throttle : ThrottleWindowState
+      getter lock : Mutex
 
       def initialize
-        @execution_lock = Channel(Nil).new(1)
-        @execution_lock.send(nil)
         @throttle = ThrottleWindowState.new
+        @lock = Mutex.new
       end
     end
 
     class InMemoryReservation < Reservation
-      def initialize(payload : JobPayload, @execution_lock : Channel(Nil))
-        super(payload)
-        @released = false
-      end
-
       def ack : Nil
-        release_execution_lock
       end
 
       def fail(error : Exception? = nil) : Nil
-        release_execution_lock
-      end
-
-      private def release_execution_lock : Nil
-        return if @released
-        @released = true
-        @execution_lock.send(nil)
       end
     end
 
@@ -56,11 +42,7 @@ module Crumble
         @delayed_sequence = 0_i64
       end
 
-      def enqueue(payload : JobPayload) : Nil
-        @channel.send(payload)
-      end
-
-      def requeue_at(payload : JobPayload, run_at : Time) : Nil
+      def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
         run_at_unix_ms = run_at.to_unix_ms
         return @channel.send(payload) if run_at_unix_ms <= unix_milliseconds
 
@@ -100,19 +82,37 @@ module Crumble
       end
 
       private def reservation_for(payload : JobPayload) : InMemoryReservation?
-        job_class_state = job_class_state_for(payload.job_class)
-        job_class_state.execution_lock.receive
-        begin
-          if run_at_unix_ms = throttle_requeue_at(payload.job_class, job_class_state)
-            requeue_at(payload, Time.unix_ms(run_at_unix_ms))
-            job_class_state.execution_lock.send(nil)
+        if run_at_unix_ms = throttle_requeue_at(payload.job_class)
+          enqueue(payload, run_at: Time.unix_ms(run_at_unix_ms))
+          return nil
+        end
+
+        InMemoryReservation.new(payload)
+      end
+
+      private def throttle_requeue_at(job_class : String) : Int64?
+        config = Crumble::Jobs.throttle_config_for(job_class)
+        return nil unless config
+
+        timespan_milliseconds = config.timespan.total_milliseconds.to_i64
+        job_class_state = job_class_state_for(job_class)
+        job_class_state.lock.synchronize do
+          now = unix_milliseconds
+          window_started_at = job_class_state.throttle.window_started_at_unix_ms
+
+          # Keep a fixed execution window per class that starts with the first job in a burst.
+          if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
+            job_class_state.throttle.window_started_at_unix_ms = now
+            job_class_state.throttle.jobs_started_in_window = 0
+            window_started_at = now
+          end
+
+          if job_class_state.throttle.jobs_started_in_window < config.max_jobs
+            job_class_state.throttle.jobs_started_in_window += 1
             return nil
           end
 
-          InMemoryReservation.new(payload, job_class_state.execution_lock)
-        rescue error
-          job_class_state.execution_lock.send(nil)
-          raise error
+          window_started_at + timespan_milliseconds
         end
       end
 
@@ -126,45 +126,23 @@ module Crumble
         end
       end
 
-      private def throttle_requeue_at(job_class : String, job_class_state : InMemoryJobClassState) : Int64?
-        config = Crumble::Jobs.throttle_config_for(job_class)
-        return nil unless config
-
-        timespan_milliseconds = config.timespan.total_milliseconds.to_i64
-        now = unix_milliseconds
-        window_started_at = job_class_state.throttle.window_started_at_unix_ms
-
-        # Keep a fixed execution window per class that starts with the first job in a burst.
-        if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
-          job_class_state.throttle.window_started_at_unix_ms = now
-          job_class_state.throttle.jobs_started_in_window = 0
-          window_started_at = now
-        end
-
-        if job_class_state.throttle.jobs_started_in_window < config.max_jobs
-          job_class_state.throttle.jobs_started_in_window += 1
-          return nil
-        end
-
-        window_started_at + timespan_milliseconds
-      end
-
       private def due_delayed_payload : JobPayload?
         now = unix_milliseconds
         @delayed_payloads_lock.synchronize do
+          selected_index = nil
           selected = nil
 
           @delayed_payloads.each_with_index do |entry, index|
             next if entry.run_at_unix_ms > now
-
-            if selected.nil? || entry.run_at_unix_ms < @delayed_payloads[selected.not_nil!].run_at_unix_ms || (entry.run_at_unix_ms == @delayed_payloads[selected.not_nil!].run_at_unix_ms && entry.sequence < @delayed_payloads[selected.not_nil!].sequence)
-              selected = index
+            if selected.nil? || entry.run_at_unix_ms < selected.not_nil!.run_at_unix_ms || (entry.run_at_unix_ms == selected.not_nil!.run_at_unix_ms && entry.sequence < selected.not_nil!.sequence)
+              selected = entry
+              selected_index = index
             end
           end
 
-          return nil unless selected
+          return nil unless selected_index
 
-          @delayed_payloads.delete_at(selected).payload
+          @delayed_payloads.delete_at(selected_index).payload
         end
       end
 

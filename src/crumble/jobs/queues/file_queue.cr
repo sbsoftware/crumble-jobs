@@ -5,16 +5,13 @@ require "digest/sha1"
 module Crumble
   module Jobs
     class FileReservation < Reservation
-      def initialize(payload : JobPayload, @path : String, @failed_dir : String, @execution_lock : File)
+      def initialize(payload : JobPayload, @path : String, @failed_dir : String)
         super(payload)
-        @released = false
       end
 
       def ack : Nil
         File.delete(@path) if File.exists?(@path)
       rescue
-      ensure
-        release_execution_lock
       end
 
       def fail(error : Exception? = nil) : Nil
@@ -29,22 +26,6 @@ module Crumble
 
         File.write("#{failed_path}.error", error.message)
       rescue
-      ensure
-        release_execution_lock
-      end
-
-      private def release_execution_lock : Nil
-        return if @released
-        @released = true
-        begin
-          @execution_lock.flock_unlock
-        rescue
-        end
-
-        begin
-          @execution_lock.close
-        rescue
-        end
       end
     end
 
@@ -63,11 +44,7 @@ module Crumble
         ensure_dirs
       end
 
-      def enqueue(payload : JobPayload) : Nil
-        requeue_at(payload, Time.utc)
-      end
-
-      def requeue_at(payload : JobPayload, run_at : Time) : Nil
+      def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
         filename = "#{run_at.to_unix_ms}-#{next_filename_sequence}-#{payload.id}.json"
         tmp_path = File.join(@tmp_dir, "#{payload.id}.json.tmp")
         ready_path = File.join(@ready_dir, filename)
@@ -127,45 +104,20 @@ module Crumble
       end
 
       private def reservation_for(payload : JobPayload, processing_path : String) : FileReservation?
-        execution_lock = File.open(lock_path_for(payload.job_class), "a+")
-        unless try_lock_file(execution_lock)
-          execution_lock.close
-          requeue_processing_file_back(processing_path)
+        if run_at_unix_ms = throttle_requeue_at(payload.job_class)
+          requeue_processing_file_at(payload, processing_path, run_at_unix_ms)
           return nil
         end
 
-        begin
-          if run_at_unix_ms = throttle_requeue_at(payload.job_class)
-            requeue_processing_file_at(payload, processing_path, run_at_unix_ms)
-            release_file_lock(execution_lock)
-            return nil
-          end
-
-          FileReservation.new(payload, processing_path, @failed_dir, execution_lock)
-        rescue error
-          release_file_lock(execution_lock)
-          raise error
-        end
-      end
-
-      private def wait_for_file_lock(lock_file : File) : Nil
-        loop do
-          return if try_lock_file(lock_file)
-          sleep 1.millisecond
-        end
-      end
-
-      private def try_lock_file(lock_file : File) : Bool
-        lock_file.flock_exclusive(false)
-        true
-      rescue error : IO::Error
-        raise error unless error.message.try(&.includes?("already locked"))
-        false
+        FileReservation.new(payload, processing_path, @failed_dir)
       end
 
       private def throttle_requeue_at(job_class : String) : Int64?
         config = Crumble::Jobs.throttle_config_for(job_class)
         return nil unless config
+
+        throttle_lock = File.open(lock_path_for(job_class), "a+")
+        wait_for_file_lock(throttle_lock)
 
         timespan_milliseconds = config.timespan.total_milliseconds.to_i64
         state = read_throttle_state(job_class)
@@ -186,6 +138,23 @@ module Crumble
         end
 
         window_started_at + timespan_milliseconds
+      ensure
+        release_file_lock(throttle_lock) if throttle_lock
+      end
+
+      private def wait_for_file_lock(lock_file : File) : Nil
+        loop do
+          return if try_lock_file(lock_file)
+          sleep 1.millisecond
+        end
+      end
+
+      private def try_lock_file(lock_file : File) : Bool
+        lock_file.flock_exclusive(false)
+        true
+      rescue error : IO::Error
+        raise error unless error.message.try(&.includes?("already locked"))
+        false
       end
 
       private def move_to_failed(path : String, error : Exception) : Nil
@@ -218,15 +187,9 @@ module Crumble
         begin
           File.rename(processing_path, ready_path)
         rescue
-          requeue_at(payload, Time.unix_ms(run_at_unix_ms))
+          enqueue(payload, run_at: Time.unix_ms(run_at_unix_ms))
           File.delete(processing_path) if File.exists?(processing_path)
         end
-      end
-
-      private def requeue_processing_file_back(processing_path : String) : Nil
-        ready_path = File.join(@ready_dir, File.basename(processing_path))
-        File.rename(processing_path, ready_path)
-      rescue
       end
 
       private def release_file_lock(lock_file : File) : Nil
