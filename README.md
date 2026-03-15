@@ -44,6 +44,24 @@ class IncrementCounterJob < Crumble::Jobs::Job
 end
 ```
 
+Throttle a job class:
+
+```crystal
+class SyncWebhookJob < Crumble::Jobs::Job
+  throttle max_jobs: 10, timespan: 5.minutes
+  params endpoint : String
+
+  def perform : Nil
+    # ...
+  end
+end
+```
+
+`throttle` applies when a worker starts jobs, not when jobs are enqueued.
+Enqueueing is never blocked by throttling.
+A worker starts at most `max_jobs` jobs of that class inside one window, and the window starts with the first execution in the current burst.
+After the limit is reached, later jobs of the same class wait until the window expires, and same-class execution order is preserved.
+
 Enqueue a job:
 
 ```crystal

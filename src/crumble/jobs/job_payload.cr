@@ -16,7 +16,7 @@ module Crumble
         @id : String,
         @job_class : String,
         @args : Array(EncodedValue),
-        @enqueued_at : Int64
+        @enqueued_at : Int64,
       )
       end
 

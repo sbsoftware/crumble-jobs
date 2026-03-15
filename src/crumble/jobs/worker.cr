@@ -18,10 +18,13 @@ module Crumble
 
       def run_once(wait : Time::Span? = nil) : Bool
         wait = @poll_interval if wait.nil?
-        reservation = @queue.reserve(wait)
-        return false unless reservation
-
         @semaphore.receive
+        reservation = @queue.reserve(wait)
+        unless reservation
+          @semaphore.send(nil)
+          return false
+        end
+
         spawn do
           begin
             run_reservation(reservation)
