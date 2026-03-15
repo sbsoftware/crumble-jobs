@@ -57,14 +57,20 @@ module Crumble
         @failed_dir = File.join(@root, "failed")
         @tmp_dir = File.join(@root, "tmp")
         @throttle_dir = File.join(@root, "throttle")
+        @reserve_lock_path = File.join(@root, "reserve.lock")
+        @filename_sequence = 0_i64
+        @filename_sequence_lock = Mutex.new
         ensure_dirs
       end
 
       def enqueue(payload : JobPayload) : Nil
-        filename = "#{timestamp_prefix}-#{payload.id}.json"
+        requeue_at(payload, Time.utc)
+      end
+
+      def requeue_at(payload : JobPayload, run_at : Time) : Nil
+        filename = "#{run_at.to_unix_ms}-#{next_filename_sequence}-#{payload.id}.json"
         tmp_path = File.join(@tmp_dir, "#{payload.id}.json.tmp")
         ready_path = File.join(@ready_dir, filename)
-
         File.write(tmp_path, payload.to_json)
         File.rename(tmp_path, ready_path)
       end
@@ -89,7 +95,14 @@ module Crumble
       end
 
       private def try_reserve : Reservation?
+        reserve_lock = File.open(@reserve_lock_path, "a+")
+        wait_for_file_lock(reserve_lock)
+        now_unix_ms = unix_milliseconds
+
         Dir.children(@ready_dir).sort.each do |filename|
+          ready_at_unix_ms = ready_at_unix_ms(filename)
+          break if ready_at_unix_ms && ready_at_unix_ms > now_unix_ms
+
           ready_path = File.join(@ready_dir, filename)
           processing_path = File.join(@processing_dir, filename)
 
@@ -109,69 +122,70 @@ module Crumble
         end
 
         nil
+      ensure
+        release_file_lock(reserve_lock) if reserve_lock
       end
 
-      private def reservation_for(payload : JobPayload, processing_path : String) : FileReservation
+      private def reservation_for(payload : JobPayload, processing_path : String) : FileReservation?
         execution_lock = File.open(lock_path_for(payload.job_class), "a+")
-        wait_for_execution_lock(execution_lock)
+        unless try_lock_file(execution_lock)
+          execution_lock.close
+          requeue_processing_file_back(processing_path)
+          return nil
+        end
+
         begin
-          throttle_job_execution(payload.job_class)
+          if run_at_unix_ms = throttle_requeue_at(payload.job_class)
+            requeue_processing_file_at(payload, processing_path, run_at_unix_ms)
+            release_file_lock(execution_lock)
+            return nil
+          end
+
           FileReservation.new(payload, processing_path, @failed_dir, execution_lock)
         rescue error
-          begin
-            execution_lock.flock_unlock
-          rescue
-          end
-
-          begin
-            execution_lock.close
-          rescue
-          end
-
+          release_file_lock(execution_lock)
           raise error
         end
       end
 
-      private def wait_for_execution_lock(execution_lock : File) : Nil
-        # Non-blocking flock attempts keep the scheduler responsive while another
-        # worker process/fiber still owns the class execution lock.
+      private def wait_for_file_lock(lock_file : File) : Nil
         loop do
-          begin
-            execution_lock.flock_exclusive(false)
-            return
-          rescue error : IO::Error
-            raise error unless error.message.try(&.includes?("already locked"))
-            sleep 1.millisecond
-          end
+          return if try_lock_file(lock_file)
+          sleep 1.millisecond
         end
       end
 
-      private def throttle_job_execution(job_class : String) : Nil
+      private def try_lock_file(lock_file : File) : Bool
+        lock_file.flock_exclusive(false)
+        true
+      rescue error : IO::Error
+        raise error unless error.message.try(&.includes?("already locked"))
+        false
+      end
+
+      private def throttle_requeue_at(job_class : String) : Int64?
         config = Crumble::Jobs.throttle_config_for(job_class)
-        return unless config
+        return nil unless config
 
         timespan_milliseconds = config.timespan.total_milliseconds.to_i64
-        loop do
-          state = read_throttle_state(job_class)
-          now = unix_milliseconds
-          window_started_at = state.window_started_at_unix_ms
+        state = read_throttle_state(job_class)
+        now = unix_milliseconds
+        window_started_at = state.window_started_at_unix_ms
 
-          # Keep a fixed execution window per class that starts with the first job in a burst.
-          if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
-            state.window_started_at_unix_ms = now
-            state.jobs_started_in_window = 0
-            window_started_at = now
-          end
-
-          if state.jobs_started_in_window < config.max_jobs
-            state.jobs_started_in_window += 1
-            write_throttle_state(job_class, state)
-            return
-          end
-
-          wait_for = timespan_milliseconds - (now - window_started_at)
-          sleep(wait_for.milliseconds) if wait_for > 0
+        # Keep a fixed execution window per class that starts with the first job in a burst.
+        if window_started_at.nil? || now - window_started_at >= timespan_milliseconds
+          state.window_started_at_unix_ms = now
+          state.jobs_started_in_window = 0
+          window_started_at = now
         end
+
+        if state.jobs_started_in_window < config.max_jobs
+          state.jobs_started_in_window += 1
+          write_throttle_state(job_class, state)
+          return nil
+        end
+
+        window_started_at + timespan_milliseconds
       end
 
       private def move_to_failed(path : String, error : Exception) : Nil
@@ -195,10 +209,36 @@ module Crumble
         Dir.mkdir_p(@throttle_dir)
       end
 
-      private def timestamp_prefix : String
-        now = Time.utc
-        millis = now.to_unix * 1000 + now.nanosecond / 1_000_000
-        millis.to_s
+      private def ready_at_unix_ms(filename : String) : Int64?
+        filename.split("-", 2)[0]?.try(&.to_i64?)
+      end
+
+      private def requeue_processing_file_at(payload : JobPayload, processing_path : String, run_at_unix_ms : Int64) : Nil
+        ready_path = File.join(@ready_dir, "#{run_at_unix_ms}-#{File.basename(processing_path)}")
+        begin
+          File.rename(processing_path, ready_path)
+        rescue
+          requeue_at(payload, Time.unix_ms(run_at_unix_ms))
+          File.delete(processing_path) if File.exists?(processing_path)
+        end
+      end
+
+      private def requeue_processing_file_back(processing_path : String) : Nil
+        ready_path = File.join(@ready_dir, File.basename(processing_path))
+        File.rename(processing_path, ready_path)
+      rescue
+      end
+
+      private def release_file_lock(lock_file : File) : Nil
+        begin
+          lock_file.flock_unlock
+        rescue
+        end
+
+        begin
+          lock_file.close
+        rescue
+        end
       end
 
       private def lock_path_for(job_class : String) : String
@@ -232,6 +272,12 @@ module Crumble
       private def unix_milliseconds : Int64
         now = Time.utc
         now.to_unix * 1000 + now.nanosecond // 1_000_000
+      end
+
+      private def next_filename_sequence : Int64
+        @filename_sequence_lock.synchronize do
+          @filename_sequence += 1
+        end
       end
     end
   end

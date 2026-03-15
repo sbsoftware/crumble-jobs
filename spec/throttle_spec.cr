@@ -50,10 +50,9 @@ describe "job throttling" do
     3.times { |index| ThrottledInMemoryJob.enqueue(sequence: index + 1) }
 
     worker = Crumble::Jobs::Worker.new(max_concurrency: 3, poll_interval: 1.millisecond)
-    3.times { worker.run_once(50.milliseconds).should be_true }
-
     deadline = Time.instant + 2.seconds
     until ThrottledInMemoryJob.starts.size == 3 || Time.instant >= deadline
+      worker.run_once(10.milliseconds)
       sleep 2.milliseconds
     end
 
@@ -73,12 +72,10 @@ describe "job throttling" do
 
     worker_one = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
     worker_two = Crumble::Jobs::Worker.new(queue: queue, max_concurrency: 1, poll_interval: 1.millisecond)
-    worker_one.run_once(50.milliseconds).should be_true
-    worker_two.run_once(50.milliseconds).should be_true
-    worker_one.run_once(500.milliseconds).should be_true
-
     deadline = Time.instant + 2.seconds
     until ThrottledInMemoryJob.starts.size == 3 || Time.instant >= deadline
+      worker_one.run_once(10.milliseconds)
+      worker_two.run_once(10.milliseconds)
       sleep 2.milliseconds
     end
 
@@ -99,10 +96,9 @@ describe "job throttling" do
       3.times { |index| ThrottledFileJob.enqueue(sequence: index + 1) }
 
       worker = Crumble::Jobs::Worker.new(max_concurrency: 3, poll_interval: 1.millisecond)
-      3.times { worker.run_once(500.milliseconds).should be_true }
-
       deadline = Time.instant + 2.seconds
       until ThrottledFileJob.starts.size == 3 || Time.instant >= deadline
+        worker.run_once(10.milliseconds)
         sleep 2.milliseconds
       end
 
@@ -129,12 +125,10 @@ describe "job throttling" do
 
       worker_one = Crumble::Jobs::Worker.new(queue: queue_one, max_concurrency: 1, poll_interval: 1.millisecond)
       worker_two = Crumble::Jobs::Worker.new(queue: queue_two, max_concurrency: 1, poll_interval: 1.millisecond)
-      worker_one.run_once(500.milliseconds).should be_true
-      worker_two.run_once(500.milliseconds).should be_true
-      worker_one.run_once(1.second).should be_true
-
       deadline = Time.instant + 2.seconds
       until ThrottledFileJob.starts.size == 3 || Time.instant >= deadline
+        worker_one.run_once(10.milliseconds)
+        worker_two.run_once(10.milliseconds)
         sleep 2.milliseconds
       end
 
