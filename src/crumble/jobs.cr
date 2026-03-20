@@ -44,5 +44,20 @@ module Crumble
         end
       {% end %}
     end
+
+    def self.throttle_config_for(job_class : String) : ThrottleConfig?
+      {% begin %}
+        case job_class
+        {% for job_class in Crumble::Jobs::Job.all_subclasses %}
+          {% unless job_class.abstract? %}
+          when {{job_class}}.job_name
+            {{job_class}}.throttle_config
+          {% end %}
+        {% end %}
+        else
+          nil
+        end
+      {% end %}
+    end
   end
 end

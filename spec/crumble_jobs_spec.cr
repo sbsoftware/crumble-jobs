@@ -1,7 +1,5 @@
 require "./spec_helper"
 
-Crumble::Jobs.configure_queue Crumble::Jobs::InMemoryQueue.new
-
 class ExampleJob < Crumble::Jobs::Job
   params message : String, count : Int32, run_at : Time
 
@@ -21,6 +19,10 @@ class ExampleJob < Crumble::Jobs::Job
 end
 
 describe Crumble::Jobs do
+  before_each do
+    Crumble::Jobs.configure_queue Crumble::Jobs::InMemoryQueue.new
+  end
+
   it "enqueues and performs in-memory jobs" do
     ExampleJob.clear
 

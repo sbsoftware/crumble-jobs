@@ -13,7 +13,7 @@ module Crumble
     end
 
     abstract class QueueBackend
-      abstract def enqueue(payload : JobPayload) : Nil
+      abstract def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
       abstract def reserve(wait : Time::Span? = nil) : Reservation?
     end
   end

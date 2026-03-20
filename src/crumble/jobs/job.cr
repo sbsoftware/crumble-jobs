@@ -6,7 +6,43 @@ require "./value_codec"
 
 module Crumble
   module Jobs
+    record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
+
     abstract class Job
+      macro throttle(*, max_jobs, timespan)
+        {% if max_jobs.is_a?(NumberLiteral) && max_jobs <= 0 %}
+          {{ raise "throttle max_jobs must be greater than 0" }}
+        {% end %}
+
+        def self.throttle_config : Crumble::Jobs::ThrottleConfig?
+          Crumble::Jobs::ThrottleConfig.new(max_jobs: {{max_jobs}}.to_i32, timespan: {{timespan}})
+        end
+      end
+
+      macro retry_on(error_class, *, attempts, wait)
+        {% if attempts.is_a?(NumberLiteral) && attempts <= 0 %}
+          {{ raise "retry_on attempts must be greater than 0" }}
+        {% end %}
+        {% module_name = "RetryOn_#{error_class.id}".gsub(/::/, "__").id %}
+
+        module {{module_name}}
+          def retry_counter_key_for(error : Exception) : String?
+            return {{error_class.stringify}} if error.is_a?({{error_class}})
+            super
+          end
+
+          def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+            if error.is_a?({{error_class}})
+              return nil if tries > {{attempts}}.to_i32
+              return {{wait}}.call(tries)
+            end
+            super
+          end
+        end
+
+        include {{module_name}}
+      end
+
       macro params(*fields)
         {% allowed = ["String", "Int32", "Int64", "Float32", "Float64", "Time"] %}
         {% for field in fields %}
@@ -82,8 +118,20 @@ module Crumble
         name.to_s
       end
 
+      def self.throttle_config : Crumble::Jobs::ThrottleConfig?
+        nil
+      end
+
       abstract def perform : Nil
       abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
+
+      def retry_counter_key_for(error : Exception) : String?
+        nil
+      end
+
+      def next_retry_in(error : Exception, tries : Int32) : Time::Span?
+        nil
+      end
 
       def enqueue : String
         now = Time.utc
