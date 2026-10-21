@@ -40,6 +40,8 @@ module Crumble
         @delayed_payloads = [] of InMemoryDelayedPayload
         @delayed_payloads_lock = Mutex.new
         @delayed_sequence = 0_i64
+        @seeded_periodic_job_classes = Set(String).new
+        @seeded_periodic_job_classes_lock = Mutex.new
       end
 
       def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
@@ -49,6 +51,15 @@ module Crumble
         @delayed_payloads_lock.synchronize do
           @delayed_sequence += 1
           @delayed_payloads << InMemoryDelayedPayload.new(run_at_unix_ms, @delayed_sequence, payload)
+        end
+      end
+
+      def enqueue_unless_pending(payload : JobPayload, run_at : Time = Time.utc) : Bool
+        @seeded_periodic_job_classes_lock.synchronize do
+          return false if @seeded_periodic_job_classes.includes?(payload.job_class)
+          @seeded_periodic_job_classes << payload.job_class
+          enqueue(payload, run_at)
+          true
         end
       end
 

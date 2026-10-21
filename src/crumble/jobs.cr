@@ -59,5 +59,32 @@ module Crumble
         end
       {% end %}
     end
+
+    def self.periodic_interval_for(job_class : String) : Time::Span?
+      {% begin %}
+        case job_class
+        {% for job_class in Crumble::Jobs::Job.all_subclasses %}
+          {% unless job_class.abstract? %}
+          when {{job_class}}.job_name
+            {{job_class}}.periodic_interval
+          {% end %}
+        {% end %}
+        else
+          nil
+        end
+      {% end %}
+    end
+
+    def self.seed_periodic_jobs(queue : QueueBackend = self.queue) : Int32
+      seeded = 0
+      {% begin %}
+        {% for job_class in Crumble::Jobs::Job.all_subclasses %}
+          {% unless job_class.abstract? %}
+            seeded += 1 if {{job_class}}.seed_periodic(queue)
+          {% end %}
+        {% end %}
+      {% end %}
+      seeded
+    end
   end
 end

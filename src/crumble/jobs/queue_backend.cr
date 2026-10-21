@@ -15,6 +15,11 @@ module Crumble
     abstract class QueueBackend
       abstract def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
       abstract def reserve(wait : Time::Span? = nil) : Reservation?
+
+      def enqueue_unless_pending(payload : JobPayload, run_at : Time = Time.utc) : Bool
+        enqueue(payload, run_at)
+        true
+      end
     end
   end
 end

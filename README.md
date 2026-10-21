@@ -68,6 +68,21 @@ Enqueue a job:
 IncrementCounterJob.enqueue("session-uuid", 123)
 ```
 
+Declare a zero-argument job as periodic to seed it when the worker starts and schedule its next occurrence after each run:
+
+```crystal
+class RefreshPricesJob < Crumble::Jobs::Job
+  periodic every: 5.minutes
+  params
+
+  def perform : Nil
+    # ...
+  end
+end
+```
+
+Periodic jobs are paced from the completion of one occurrence to the start of the next. Failed occurrences also schedule the next run. `FileQueue` checks ready and currently processing jobs when seeding, preventing a restart from creating a parallel chain. Applications that manage their own worker loop can call `Crumble::Jobs.seed_periodic_jobs` explicitly.
+
 ### Worker
 
 ```crystal

@@ -38,6 +38,7 @@ module Crumble
         @tmp_dir = File.join(@root, "tmp")
         @throttle_dir = File.join(@root, "throttle")
         @reserve_lock_path = File.join(@root, "reserve.lock")
+        @periodic_seed_lock_path = File.join(@root, "periodic-seed.lock")
         @filename_sequence = 0_i64
         @filename_sequence_lock = Mutex.new
         ensure_dirs
@@ -49,6 +50,16 @@ module Crumble
         ready_path = File.join(@ready_dir, filename)
         File.write(tmp_path, payload.to_json)
         File.rename(tmp_path, ready_path)
+      end
+
+      def enqueue_unless_pending(payload : JobPayload, run_at : Time = Time.utc) : Bool
+        seed_lock = File.open(@periodic_seed_lock_path, "a+")
+        wait_for_file_lock(seed_lock)
+        return false if pending_job_class?(payload.job_class)
+        enqueue(payload, run_at)
+        true
+      ensure
+        release_file_lock(seed_lock) if seed_lock
       end
 
       def reserve(wait : Time::Span? = nil) : Reservation?
@@ -175,6 +186,16 @@ module Crumble
         Dir.mkdir_p(@failed_dir)
         Dir.mkdir_p(@tmp_dir)
         Dir.mkdir_p(@throttle_dir)
+      end
+
+      private def pending_job_class?(job_class : String) : Bool
+        [@ready_dir, @processing_dir].any? do |directory|
+          Dir.children(directory).any? do |filename|
+            JobPayload.from_json(File.read(File.join(directory, filename))).job_class == job_class
+          rescue
+            false
+          end
+        end
       end
 
       private def ready_at_unix_ms(filename : String) : Int64?
