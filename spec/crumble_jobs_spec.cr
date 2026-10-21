@@ -18,6 +18,13 @@ class ExampleJob < Crumble::Jobs::Job
   end
 end
 
+class EmptyJob < Crumble::Jobs::Job
+  params
+
+  def perform : Nil
+  end
+end
+
 describe Crumble::Jobs do
   before_each do
     Crumble::Jobs.configure_queue Crumble::Jobs::InMemoryQueue.new
@@ -64,6 +71,33 @@ describe Crumble::Jobs do
     example_job.message.should eq("hello")
     example_job.count.should eq(3)
     example_job.run_at.to_unix.should eq(run_at.to_unix)
+  end
+
+  it "enqueues job instances after a wait" do
+    queue = Crumble::Jobs::InMemoryQueue.new
+    Crumble::Jobs.configure_queue queue
+
+    ExampleJob.new(message: "later", count: 1, run_at: Time.utc).enqueue(wait: 80.milliseconds)
+    queue.reserve(20.milliseconds).should be_nil
+    queue.reserve(200.milliseconds).should_not be_nil
+  end
+
+  it "enqueues parameterized jobs after an interval" do
+    queue = Crumble::Jobs::InMemoryQueue.new
+    Crumble::Jobs.configure_queue queue
+
+    ExampleJob.enqueue_in(80.milliseconds, message: "later", count: 1, run_at: Time.utc)
+    queue.reserve(20.milliseconds).should be_nil
+    queue.reserve(200.milliseconds).should_not be_nil
+  end
+
+  it "enqueues parameterless jobs at a time" do
+    queue = Crumble::Jobs::InMemoryQueue.new
+    Crumble::Jobs.configure_queue queue
+
+    EmptyJob.enqueue_at(Time.utc + 80.milliseconds)
+    queue.reserve(20.milliseconds).should be_nil
+    queue.reserve(200.milliseconds).should_not be_nil
   end
 
   it "raises UnknownJobError for unknown job classes" do
