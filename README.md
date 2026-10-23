@@ -44,6 +44,8 @@ class IncrementCounterJob < Crumble::Jobs::Job
 end
 ```
 
+Use `params` to declare jobs with arguments. Jobs without arguments do not need a `params` declaration.
+
 Throttle a job class:
 
 ```crystal
@@ -75,7 +77,6 @@ Declare a zero-argument job as periodic to seed it when the worker starts and sc
 ```crystal
 class RefreshPricesJob < Crumble::Jobs::Job
   periodic every: 5.minutes
-  params
 
   def perform : Nil
     # ...

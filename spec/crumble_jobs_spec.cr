@@ -19,9 +19,18 @@ class ExampleJob < Crumble::Jobs::Job
 end
 
 class EmptyJob < Crumble::Jobs::Job
-  params
+  @@runs = 0
 
   def perform : Nil
+    @@runs += 1
+  end
+
+  def self.runs : Int32
+    @@runs
+  end
+
+  def self.clear : Nil
+    @@runs = 0
   end
 end
 
@@ -47,6 +56,35 @@ describe Crumble::Jobs do
     ExampleJob.runs.should eq([
       "hi|2|#{run_at.to_unix}",
     ])
+  end
+
+  it "enqueues and performs parameterless jobs without params" do
+    EmptyJob.clear
+
+    EmptyJob.enqueue
+
+    worker = Crumble::Jobs::Worker.new(poll_interval: 10.milliseconds)
+    worker.run_once(10.milliseconds).should be_true
+
+    deadline = Time.instant + 100.milliseconds
+    until EmptyJob.runs == 1 || Time.instant >= deadline
+      sleep 1.millisecond
+    end
+
+    EmptyJob.runs.should eq(1)
+  end
+
+  it "rejects arguments when deserializing parameterless jobs without params" do
+    payload = Crumble::Jobs::JobPayload.new(
+      id: "payload-empty",
+      job_class: EmptyJob.job_name,
+      args: [Crumble::Jobs::EncodedValue.from("unexpected")],
+      enqueued_at: Time.utc.to_unix,
+    )
+
+    expect_raises(ArgumentError, "Expected 0 args for EmptyJob, got 1") do
+      Crumble::Jobs.deserialize(payload)
+    end
   end
 
   it "deserializes job payloads without a registry" do
