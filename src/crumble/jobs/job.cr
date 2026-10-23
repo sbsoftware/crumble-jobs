@@ -149,8 +149,22 @@ module Crumble
         new(*args, **options).enqueue(wait: time - Time.utc)
       end
 
+      def self.from_payload(payload : JobPayload) : self
+        unless payload.args.empty?
+          raise ArgumentError.new("Expected 0 args for #{self.name}, got #{payload.args.size}")
+        end
+        new
+      end
+
+      def self.enqueue : String
+        new.enqueue
+      end
+
       abstract def perform : Nil
-      abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
+
+      def serialize_args : Array(Crumble::Jobs::ParamValue)
+        [] of Crumble::Jobs::ParamValue
+      end
 
       def retry_counter_key_for(error : Exception) : String?
         nil
