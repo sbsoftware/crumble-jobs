@@ -141,6 +141,14 @@ module Crumble
         false
       end
 
+      def self.enqueue_in(interval : Time::Span, *args, **options) : String
+        new(*args, **options).enqueue(wait: interval)
+      end
+
+      def self.enqueue_at(time : Time, *args, **options) : String
+        new(*args, **options).enqueue(wait: time - Time.utc)
+      end
+
       abstract def perform : Nil
       abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
 
@@ -152,14 +160,11 @@ module Crumble
         nil
       end
 
-      def enqueue(run_at : Time = Time.utc) : String
+      def enqueue(wait : Time::Span? = nil) : String
+        now = Time.utc
         payload = to_payload
-        Crumble::Jobs.queue.enqueue(payload, run_at)
+        Crumble::Jobs.queue.enqueue(payload, run_at: wait ? now + wait : now)
         payload.id
-      end
-
-      def enqueue_in(wait : Time::Span) : String
-        enqueue(run_at: Time.utc + wait)
       end
 
       def to_payload : JobPayload

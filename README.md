@@ -66,6 +66,8 @@ Enqueue a job:
 
 ```crystal
 IncrementCounterJob.enqueue("session-uuid", 123)
+IncrementCounterJob.enqueue_in(5.minutes, "session-uuid", 123)
+IncrementCounterJob.enqueue_at(Time.utc + 1.hour, "session-uuid", 123)
 ```
 
 Declare a zero-argument job as periodic to seed it when the worker starts and schedule its next occurrence after each run:
