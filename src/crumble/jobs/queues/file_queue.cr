@@ -198,8 +198,6 @@ module Crumble
             else
               JobPayload.from_json(File.read(File.join(directory, filename))).job_class == job_class
             end
-          rescue
-            false
           end
         end
       end

@@ -97,6 +97,20 @@ describe "periodic jobs" do
     end
   end
 
+  it "does not seed when a legacy queue entry cannot be inspected" do
+    queue_root = File.join(Dir.tempdir, "crumble-jobs-periodic-invalid-#{UUID.random}")
+
+    begin
+      queue = Crumble::Jobs::FileQueue.new(queue_root, poll_interval: 2.milliseconds)
+      File.write(File.join(queue_root, "ready", "#{Time.utc.to_unix_ms}-1-unknown.json"), "invalid")
+
+      expect_raises(JSON::ParseException) { PeriodicPacingJob.seed_periodic(queue) }
+      Dir.children(File.join(queue_root, "ready")).size.should eq(1)
+    ensure
+      FileUtils.rm_r(queue_root) if Dir.exists?(queue_root)
+    end
+  end
+
   it "paces subsequent occurrences from completion" do
     queue = Crumble::Jobs::InMemoryQueue.new
     PeriodicPacingJob.clear
