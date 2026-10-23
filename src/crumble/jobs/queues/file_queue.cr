@@ -45,7 +45,7 @@ module Crumble
       end
 
       def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
-        filename = "#{run_at.to_unix_ms}-#{next_filename_sequence}-#{payload.id}.json"
+        filename = "#{run_at.to_unix_ms}-#{next_filename_sequence}-#{job_class_key(payload.job_class)}.job.#{payload.id}.json"
         tmp_path = File.join(@tmp_dir, "#{payload.id}.json.tmp")
         ready_path = File.join(@ready_dir, filename)
         File.write(tmp_path, payload.to_json)
@@ -189,13 +189,25 @@ module Crumble
       end
 
       private def pending_job_class?(job_class : String) : Bool
+        expected_job_class_key = job_class_key(job_class)
         [@ready_dir, @processing_dir].any? do |directory|
           Dir.children(directory).any? do |filename|
-            JobPayload.from_json(File.read(File.join(directory, filename))).job_class == job_class
+            # New queue files expose their class in the filename; only legacy files require payload IO.
+            if pending_job_class_key = job_class_key_from_filename(filename)
+              pending_job_class_key == expected_job_class_key
+            else
+              JobPayload.from_json(File.read(File.join(directory, filename))).job_class == job_class
+            end
           rescue
             false
           end
         end
+      end
+
+      private def job_class_key_from_filename(filename : String) : String?
+        encoded_prefix = filename.split(".job.", 2)
+        return nil unless encoded_prefix.size == 2
+        encoded_prefix[0].split("-").last?
       end
 
       private def ready_at_unix_ms(filename : String) : Int64?

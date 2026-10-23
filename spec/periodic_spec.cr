@@ -70,12 +70,28 @@ describe "periodic jobs" do
 
     begin
       PeriodicPacingJob.seed_periodic(Crumble::Jobs::FileQueue.new(queue_root, poll_interval: 2.milliseconds)).should be_true
+      Dir.children(File.join(queue_root, "ready")).first.should contain("-PeriodicPacingJob.job.")
       restarted_queue = Crumble::Jobs::FileQueue.new(queue_root, poll_interval: 2.milliseconds)
       PeriodicPacingJob.seed_periodic(restarted_queue).should be_false
       reservation = restarted_queue.reserve(20.milliseconds).not_nil!
       reservation.payload.job_class.should eq(PeriodicPacingJob.job_name)
       reservation.ack
       restarted_queue.reserve(10.milliseconds).should be_nil
+    ensure
+      FileUtils.rm_r(queue_root) if Dir.exists?(queue_root)
+    end
+  end
+
+  it "deduplicates legacy file queue entries without class metadata in the filename" do
+    queue_root = File.join(Dir.tempdir, "crumble-jobs-periodic-legacy-#{UUID.random}")
+
+    begin
+      queue = Crumble::Jobs::FileQueue.new(queue_root, poll_interval: 2.milliseconds)
+      payload = PeriodicPacingJob.new.to_payload
+      File.write(File.join(queue_root, "ready", "#{Time.utc.to_unix_ms}-1-#{payload.id}.json"), payload.to_json)
+
+      PeriodicPacingJob.seed_periodic(queue).should be_false
+      Dir.children(File.join(queue_root, "ready")).size.should eq(1)
     ensure
       FileUtils.rm_r(queue_root) if Dir.exists?(queue_root)
     end
