@@ -44,6 +44,8 @@ class IncrementCounterJob < Crumble::Jobs::Job
 end
 ```
 
+Use `params` to declare jobs with arguments. Jobs without arguments do not need a `params` declaration.
+
 Throttle a job class:
 
 ```crystal
@@ -66,7 +68,23 @@ Enqueue a job:
 
 ```crystal
 IncrementCounterJob.enqueue("session-uuid", 123)
+IncrementCounterJob.enqueue_in(5.minutes, "session-uuid", 123)
+IncrementCounterJob.enqueue_at(Time.utc + 1.hour, "session-uuid", 123)
 ```
+
+Declare a zero-argument job as periodic to seed it when the worker starts and schedule its next occurrence after each run:
+
+```crystal
+class RefreshPricesJob < Crumble::Jobs::Job
+  periodic every: 5.minutes
+
+  def perform : Nil
+    # ...
+  end
+end
+```
+
+Periodic jobs are paced from the completion of one occurrence to the start of the next. Failed occurrences also schedule the next run. `FileQueue` checks ready and currently processing jobs when seeding, preventing a restart from creating a parallel chain. Applications that manage their own worker loop can call `Crumble::Jobs.seed_periodic_jobs` explicitly.
 
 ### Worker
 

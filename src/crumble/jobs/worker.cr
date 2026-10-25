@@ -37,6 +37,7 @@ module Crumble
       end
 
       def start : Nil
+        Crumble::Jobs.seed_periodic_jobs(@queue)
         loop do
           run_once(@poll_interval)
         end
@@ -47,6 +48,7 @@ module Crumble
         job = nil
         job = Crumble::Jobs.deserialize(payload)
         job.perform
+        schedule_next_periodic(job)
         reservation.ack
       rescue error : UnknownJobError
         @logger.error { error.message }
@@ -68,7 +70,13 @@ module Crumble
         else
           @logger.error(exception: error) { "Job failed before payload decode" }
         end
+        schedule_next_periodic(job) if job
         reservation.fail(error)
+      end
+
+      private def schedule_next_periodic(job : Job) : Nil
+        return unless interval = job.class.periodic_interval
+        @queue.enqueue(job.to_payload, run_at: Time.utc + interval)
       end
     end
   end

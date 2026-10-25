@@ -9,6 +9,17 @@ module Crumble
     record ThrottleConfig, max_jobs : Int32, timespan : Time::Span
 
     abstract class Job
+      macro periodic(*, every)
+        def self.periodic_interval : Time::Span?
+          {{every}}
+        end
+
+        def self.seed_periodic(queue : Crumble::Jobs::QueueBackend) : Bool
+          job = new
+          queue.enqueue_unless_pending(job.to_payload)
+        end
+      end
+
       macro throttle(*, max_jobs, timespan)
         {% if max_jobs.is_a?(NumberLiteral) && max_jobs <= 0 %}
           {{ raise "throttle max_jobs must be greater than 0" }}
@@ -122,8 +133,38 @@ module Crumble
         nil
       end
 
+      def self.periodic_interval : Time::Span?
+        nil
+      end
+
+      def self.seed_periodic(queue : Crumble::Jobs::QueueBackend) : Bool
+        false
+      end
+
+      def self.enqueue_in(interval : Time::Span, *args, **options) : String
+        new(*args, **options).enqueue(wait: interval)
+      end
+
+      def self.enqueue_at(time : Time, *args, **options) : String
+        new(*args, **options).enqueue(wait: time - Time.utc)
+      end
+
+      def self.from_payload(payload : JobPayload) : self
+        unless payload.args.empty?
+          raise ArgumentError.new("Expected 0 args for #{self.name}, got #{payload.args.size}")
+        end
+        new
+      end
+
+      def self.enqueue : String
+        new.enqueue
+      end
+
       abstract def perform : Nil
-      abstract def serialize_args : Array(Crumble::Jobs::ParamValue)
+
+      def serialize_args : Array(Crumble::Jobs::ParamValue)
+        [] of Crumble::Jobs::ParamValue
+      end
 
       def retry_counter_key_for(error : Exception) : String?
         nil
@@ -133,19 +174,23 @@ module Crumble
         nil
       end
 
-      def enqueue : String
+      def enqueue(wait : Time::Span? = nil) : String
+        now = Time.utc
+        payload = to_payload
+        Crumble::Jobs.queue.enqueue(payload, run_at: wait ? now + wait : now)
+        payload.id
+      end
+
+      def to_payload : JobPayload
         now = Time.utc
         encoded_args = serialize_args.map { |value| EncodedValue.from(value) }
 
-        payload = JobPayload.new(
+        JobPayload.new(
           id: UUID.random.to_s,
           job_class: self.class.job_name,
           args: encoded_args,
           enqueued_at: now.to_unix,
         )
-
-        Crumble::Jobs.queue.enqueue(payload)
-        payload.id
       end
     end
   end
