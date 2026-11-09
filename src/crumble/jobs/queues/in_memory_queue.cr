@@ -23,10 +23,30 @@ module Crumble
     end
 
     class InMemoryReservation < Reservation
+      def initialize(payload : JobPayload, @queue : InMemoryQueue)
+        super(payload)
+        @completed = false
+        @lock = Mutex.new
+      end
+
       def ack : Nil
+        complete
       end
 
       def fail(error : Exception? = nil) : Nil
+        complete
+      end
+
+      def release : Nil
+        @lock.synchronize do
+          return if @completed
+          @completed = true
+          @queue.enqueue(payload)
+        end
+      end
+
+      private def complete : Nil
+        @lock.synchronize { @completed = true }
       end
     end
 
@@ -98,7 +118,7 @@ module Crumble
           return nil
         end
 
-        InMemoryReservation.new(payload)
+        InMemoryReservation.new(payload, self)
       end
 
       private def throttle_requeue_at(job_class : String) : Int64?

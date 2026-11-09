@@ -4,26 +4,55 @@ require "../throttle_state"
 module Crumble
   module Jobs
     class FileReservation < Reservation
-      def initialize(payload : JobPayload, @path : String, @failed_dir : String)
+      def initialize(payload : JobPayload, @path : String, @failed_dir : String, @ready_dir : String, @reserve_lock_path : String, @file : File)
         super(payload)
+        @completed = false
+        @lock = Mutex.new
       end
 
       def ack : Nil
-        File.delete(@path) if File.exists?(@path)
-      rescue
+        complete { File.delete(@path) if File.exists?(@path) }
       end
 
       def fail(error : Exception? = nil) : Nil
-        failed_path = File.join(@failed_dir, File.basename(@path))
-
-        begin
+        complete do
+          failed_path = File.join(@failed_dir, File.basename(@path))
           File.rename(@path, failed_path) if File.exists?(@path)
-        rescue
+          File.write("#{failed_path}.error", error.message) if error
         end
+      end
 
-        return unless error
+      def release : Nil
+        @lock.synchronize do
+          return if @completed
+          reserve_lock = File.open(@reserve_lock_path, "a+")
+          reserve_lock.flock_exclusive
 
-        File.write("#{failed_path}.error", error.message)
+          begin
+            File.rename(@path, File.join(@ready_dir, File.basename(@path))) if File.exists?(@path)
+            @completed = true
+          ensure
+            close_file(reserve_lock)
+            close_file(@file)
+          end
+        end
+      rescue
+      end
+
+      private def complete(&) : Nil
+        @lock.synchronize do
+          return if @completed
+          yield
+          @completed = true
+          close_file(@file)
+        end
+      rescue
+        close_file(@file)
+      end
+
+      private def close_file(file : File) : Nil
+        file.flock_unlock
+        file.close
       rescue
       end
     end
@@ -42,6 +71,7 @@ module Crumble
         @filename_sequence = 0_i64
         @filename_sequence_lock = Mutex.new
         ensure_dirs
+        recover_abandoned
       end
 
       def enqueue(payload : JobPayload, run_at : Time = Time.utc) : Nil
@@ -55,6 +85,7 @@ module Crumble
       def enqueue_unless_pending(payload : JobPayload, run_at : Time = Time.utc) : Bool
         seed_lock = File.open(@periodic_seed_lock_path, "a+")
         wait_for_file_lock(seed_lock)
+        recover_abandoned
         return false if pending_job_class?(payload.job_class)
         enqueue(payload, run_at)
         true
@@ -84,6 +115,7 @@ module Crumble
       private def try_reserve : Reservation?
         reserve_lock = File.open(@reserve_lock_path, "a+")
         wait_for_file_lock(reserve_lock)
+        recover_abandoned_locked
         now_unix_ms = unix_milliseconds
 
         Dir.children(@ready_dir).sort.each do |filename|
@@ -95,14 +127,18 @@ module Crumble
 
           begin
             File.rename(ready_path, processing_path)
+            processing_file = File.open(processing_path, "r+")
+            processing_file.flock_exclusive
           rescue
+            processing_file.try { |file| release_file_lock(file) }
             next
           end
 
           begin
             payload = JobPayload.from_json(File.read(processing_path))
-            return reservation_for(payload, processing_path)
+            return reservation_for(payload, processing_path, processing_file)
           rescue error
+            release_file_lock(processing_file)
             move_to_failed(processing_path, error)
             next
           end
@@ -113,13 +149,38 @@ module Crumble
         release_file_lock(reserve_lock) if reserve_lock
       end
 
-      private def reservation_for(payload : JobPayload, processing_path : String) : FileReservation?
+      private def reservation_for(payload : JobPayload, processing_path : String, processing_file : File) : FileReservation?
         if run_at_unix_ms = throttle_requeue_at(payload.job_class)
           requeue_processing_file_at(payload, processing_path, run_at_unix_ms)
+          release_file_lock(processing_file)
           return nil
         end
 
-        FileReservation.new(payload, processing_path, @failed_dir)
+        FileReservation.new(payload, processing_path, @failed_dir, @ready_dir, @reserve_lock_path, processing_file)
+      end
+
+      private def recover_abandoned : Nil
+        reserve_lock = File.open(@reserve_lock_path, "a+")
+        wait_for_file_lock(reserve_lock)
+        recover_abandoned_locked
+      ensure
+        release_file_lock(reserve_lock) if reserve_lock
+      end
+
+      private def recover_abandoned_locked : Nil
+        Dir.children(@processing_dir).each do |filename|
+          processing_path = File.join(@processing_dir, filename)
+          processing_file = nil
+
+          begin
+            processing_file = File.open(processing_path, "r+")
+            next unless try_lock_file(processing_file)
+            File.rename(processing_path, File.join(@ready_dir, filename))
+          rescue
+          ensure
+            release_file_lock(processing_file) if processing_file
+          end
+        end
       end
 
       private def throttle_requeue_at(job_class : String) : Int64?
