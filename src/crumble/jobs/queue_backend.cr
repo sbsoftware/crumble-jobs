@@ -10,6 +10,7 @@ module Crumble
 
       abstract def ack : Nil
       abstract def fail(error : Exception? = nil) : Nil
+      abstract def release : Nil
     end
 
     abstract class QueueBackend

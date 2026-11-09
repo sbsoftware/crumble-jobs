@@ -10,25 +10,41 @@ module Crumble
         @poll_interval : Time::Span = 1.second,
         @logger : Log = Log.for("crumble.jobs.worker"),
         max_concurrency : Int32 = 1,
+        @shutdown_timeout : Time::Span = 30.seconds,
       )
         @max_concurrency = max_concurrency < 1 ? 1 : max_concurrency
         @semaphore = Channel(Nil).new(@max_concurrency)
         @max_concurrency.times { @semaphore.send(nil) }
+        @active_reservations = {} of UInt64 => Reservation
+        @active_reservations_lock = Mutex.new
+        @reservation_sequence = 0_u64
+        @stopping = false
       end
 
       def run_once(wait : Time::Span? = nil) : Bool
+        return false if stopping?
         wait = @poll_interval if wait.nil?
         @semaphore.receive
+        if stopping?
+          @semaphore.send(nil)
+          return false
+        end
         reservation = @queue.reserve(wait)
         unless reservation
           @semaphore.send(nil)
           return false
         end
 
+        unless reservation_id = track(reservation)
+          reservation.release
+          @semaphore.send(nil)
+          return false
+        end
         spawn do
           begin
             run_reservation(reservation)
           ensure
+            untrack(reservation_id)
             @semaphore.send(nil)
           end
         end
@@ -38,9 +54,54 @@ module Crumble
 
       def start : Nil
         Crumble::Jobs.seed_periodic_jobs(@queue)
-        loop do
+        install_signal_handlers
+        until stopping?
           run_once(@poll_interval)
         end
+        drain
+      end
+
+      def shutdown(timeout : Time::Span = @shutdown_timeout) : Nil
+        request_stop
+        drain(timeout)
+      end
+
+      private def install_signal_handlers : Nil
+        Signal::TERM.trap { request_stop }
+        Signal::INT.trap { request_stop }
+      end
+
+      private def drain(timeout : Time::Span = @shutdown_timeout) : Nil
+        deadline = Time.instant + timeout
+        until active_reservations.empty? || Time.instant >= deadline
+          sleep 1.millisecond
+        end
+        active_reservations.each(&.release)
+      end
+
+      private def track(reservation : Reservation) : UInt64?
+        @active_reservations_lock.synchronize do
+          return nil if @stopping
+          @reservation_sequence += 1
+          @active_reservations[@reservation_sequence] = reservation
+          @reservation_sequence
+        end
+      end
+
+      private def untrack(reservation_id : UInt64) : Nil
+        @active_reservations_lock.synchronize { @active_reservations.delete(reservation_id) }
+      end
+
+      private def active_reservations : Array(Reservation)
+        @active_reservations_lock.synchronize { @active_reservations.values }
+      end
+
+      private def stopping? : Bool
+        @active_reservations_lock.synchronize { @stopping }
+      end
+
+      private def request_stop : Nil
+        @active_reservations_lock.synchronize { @stopping = true }
       end
 
       private def run_reservation(reservation : Reservation) : Nil
