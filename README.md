@@ -89,9 +89,11 @@ Periodic jobs are paced from the completion of one occurrence to the start of th
 ### Worker
 
 ```crystal
-worker = Crumble::Jobs::Worker.new(max_concurrency: 4)
+worker = Crumble::Jobs::Worker.new(max_concurrency: 4, shutdown_timeout: 30.seconds)
 worker.start
 ```
+
+`start` handles `SIGTERM` and `SIGINT` by stopping new reservations and waiting up to `shutdown_timeout` for active jobs. Reservations still running after the timeout are returned to the queue. `FileQueue` also recovers reservations abandoned by crashes or forced termination while preserving reservations locked by other live worker processes.
 
 ## Development
 
